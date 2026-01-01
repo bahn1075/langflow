@@ -1,0 +1,44 @@
+docker run -p 7860:7860 langflowai/langflow:latest
+
+# langflow의 vector store로 oracle을 제시했던 commit. pull 되지 못함
+
+https://github.com/langflow-ai/langflow/pull/7585/commits/094130b5d0d16fff9fffefb3c5b9cdc0b5d3f417
+
+# langflow의 vector store로 oracle을 사용하는 custom component
+https://github.com/paulparkinson/langflow-agenticai-oracle-mcp-vector-nl2sql
+
+# 운영관점에서의 pgvector 사용
+https://medium.com/@speedcraft21/rag-that-ships-vllm-pgvector-in-production-eaece6a2d9f6
+
+
+
+docker rm -f ollama-ipex
+
+docker run -d \
+  --name ollama-ipex \
+  --device /dev/dri \
+  --network=host \
+  -v ~/ollama-ipex:/root/.ollama \
+  -e OLLAMA_NUM_GPU=999 \
+  -e OLLAMA_INTEL_GPU=true \
+  -e ONEAPI_DEVICE_SELECTOR=level_zero:gpu \
+  -e SYCL_CACHE_PERSISTENT=1 \
+  -e ZES_ENABLE_SYSMAN=1 \
+  --restart unless-stopped \
+  intelanalytics/ipex-llm-inference-cpp-xpu:latest \
+  bash -c "echo 'alias ollama=/usr/local/lib/python3.11/dist-packages/bigdl/cpp/libs/ollama/ollama' >> ~/.bashrc && \
+           echo 'export PATH=\$PATH:/usr/local/lib/python3.11/dist-packages/bigdl/cpp/libs/ollama' >> ~/.bashrc && \
+           init-ollama && \
+           /usr/local/lib/python3.11/dist-packages/bigdl/cpp/libs/ollama/ollama serve"
+모델 pull
+
+# 호스트에서 직접
+curl http://localhost:11434/api/pull -d '{"name": "qwen3:8b"}'
+
+# 또는 컨테이너 안에서
+docker exec -it ollama-ipex bash
+
+export PATH=$PATH:/usr/local/lib/python3.11/dist-packages/bigdl/cpp/libs/ollama
+ollama pull qwen3:8b
+ollama run qwen3:8b
+ollama pull bge-m3:latest

@@ -1,0 +1,4 @@
+# Homebrew로 설치 (이미 Homebrew가 있으니)
+brew install python@3.13
+
+

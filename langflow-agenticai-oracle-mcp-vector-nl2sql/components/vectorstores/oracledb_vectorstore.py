@@ -1,120 +1,75 @@
-
-"""
-Oracle Database Vector Store Component with Local Embeddings Integration
-(Configurable retrieval behavior for Langflow)
-
-This component integrates Oracle 23ai Vector Store (OracleVS) with a pluggable
-embeddings handle and exposes configurable search parameters such as:
-  - number_of_results (k)
-  - search_type (similarity, mmr, similarity_score_threshold)
-  - score_threshold (for threshold mode)
-  - fetch_k (preselect pool size before filtering/MMR)
-  - mmr_lambda (diversity vs. similarity)
-  - distance_strategy (COSINE, EUCLIDEAN, DOT_PRODUCT)
-
-Author: Paul Parkinson
-"""
-
-import oracledb
-from typing import List
-
-from langchain_community.vectorstores.oraclevs import OracleVS
-from langchain_community.vectorstores.utils import DistanceStrategy
-
-from langflow.base.vectorstores.model import (
-    LCVectorStoreComponent,
-    check_cached_vector_store,
-)
-from langflow.helpers.data import docs_to_data
-from langflow.io import (
+from lfx.base.vectorstores.model import LCVectorStoreComponent, check_cached_vector_store
+from lfx.helpers.data import docs_to_data
+from lfx.io import (
+    DropdownInput,
+    FloatInput,
     HandleInput,
     IntInput,
-    StrInput,
     SecretStrInput,
-    MessageTextInput,
-    FloatInput,
-    DropdownInput,
+    StrInput,
 )
-from langflow.schema import Data
+from lfx.schema.data import Data
 
 
 class OracleDatabaseVectorStoreComponent(LCVectorStoreComponent):
-    """
-    Oracle Database Vector Store optimized for local embeddings with configurable retrieval.
-    """
+    """Oracle Database 23ai vector store with search capabilities."""
 
-    display_name = "Oracle Database Vector Store"
-    description = "Oracle 23ai Vector Store with local embeddings (no cloud dependencies) and configurable retrieval"
-    name = "oracledb_vector"
+    display_name: str = "Oracle Database Vector Store"
+    description: str = "Oracle 23ai Vector Store with local embeddings and configurable retrieval"
+    name = "OracleDBVector"
+    icon = "Oracle"
 
-    # ---------------------
-    # UI Inputs
-    # ---------------------
     inputs = [
-        # Connection
         SecretStrInput(
             name="db_user",
             display_name="Database User",
             info="Oracle database username (e.g., ADMIN)",
-            required=True,
         ),
         SecretStrInput(
             name="db_password",
             display_name="Database Password",
             info="Oracle database password",
-            required=True,
         ),
         SecretStrInput(
             name="dsn",
             display_name="DSN",
-            info="Database connection string (e.g., myatp_high)",
-            required=True,
+            info="Database connection string (e.g., CA4X9LQR5QLMO4EB_high)",
         ),
         SecretStrInput(
             name="wallet_dir",
             display_name="Wallet Directory",
-            info="Path to Oracle wallet directory",
-            required=True,
+            info="Path to Oracle wallet directory (e.g., /data/wallet)",
+            value="/data/wallet",
         ),
         SecretStrInput(
             name="wallet_password",
             display_name="Wallet Password",
             info="Oracle wallet password",
-            required=True,
         ),
-
-        # Storage/table
         StrInput(
             name="table_name",
             display_name="Table Name",
             info="Vector table name (e.g., PDFCOLLECTION)",
             value="PDFCOLLECTION",
-            required=True,
         ),
-
-        # Query
-        MessageTextInput(
-            name="search_query",
-            display_name="Search Query",
-            info="Enter your search query for vector similarity search",
+        DropdownInput(
+            name="distance_strategy",
+            display_name="Distance Strategy",
+            options=["COSINE", "EUCLIDEAN_DISTANCE", "DOT_PRODUCT"],
+            value="COSINE",
+            advanced=True,
         ),
-
-        # Embedding handle
         *LCVectorStoreComponent.inputs,
         HandleInput(
             name="embedding",
             display_name="Embedding Model",
             input_types=["Embeddings"],
-            info="Connect a Local SentenceTransformer or other embedding model",
         ),
-
-        # Retrieval configuration
         IntInput(
             name="number_of_results",
-            display_name="Number of Results (k)",
-            info="Maximum number of results to return",
+            display_name="Number of Results",
             value=5,
-            advanced=False,
+            advanced=True,
         ),
         DropdownInput(
             name="search_type",
@@ -125,37 +80,51 @@ class OracleDatabaseVectorStoreComponent(LCVectorStoreComponent):
         ),
         FloatInput(
             name="score_threshold",
-            display_name="Score Threshold (for threshold mode)",
+            display_name="Score Threshold",
             value=0.35,
             advanced=True,
         ),
         IntInput(
             name="fetch_k",
-            display_name="Fetch K (preselect pool)",
-            info="Number of top candidates to fetch before MMR/threshold filtering",
+            display_name="Fetch K",
             value=20,
             advanced=True,
         ),
         FloatInput(
             name="mmr_lambda",
-            display_name="MMR Lambda (0=diversity, 1=similarity)",
+            display_name="MMR Lambda",
             value=0.5,
-            advanced=True,
-        ),
-        DropdownInput(
-            name="distance_strategy_ui",
-            display_name="Distance Strategy",
-            options=["COSINE", "EUCLIDEAN", "DOT_PRODUCT"],
-            value="COSINE",
             advanced=True,
         ),
     ]
 
-    # ---------------------
-    # Connection
-    # ---------------------
-    def get_database_connection(self) -> oracledb.Connection:
-        """Create Oracle database connection with wallet authentication."""
+    def _clean_metadata(self, metadata):
+        """Clean metadata to ensure JSON serializability."""
+        import json
+
+        if not metadata:
+            return {}
+
+        cleaned = {}
+        for key, value in metadata.items():
+            try:
+                json.dumps(value)
+                cleaned[key] = value
+            except (TypeError, ValueError):
+                cleaned[key] = str(value)
+
+        return cleaned
+
+    @check_cached_vector_store
+    def build_vector_store(self):
+        try:
+            import oracledb
+            from langchain_community.vectorstores.oraclevs import OracleVS
+            from langchain_community.vectorstores.utils import DistanceStrategy
+        except ImportError as e:
+            msg = "Could not import required packages."
+            raise ImportError(msg) from e
+
         connect_args = {
             "user": self.db_user,
             "password": self.db_password,
@@ -164,165 +133,131 @@ class OracleDatabaseVectorStoreComponent(LCVectorStoreComponent):
             "wallet_location": self.wallet_dir,
             "wallet_password": self.wallet_password,
         }
+
         try:
-            return oracledb.connect(**connect_args)
+            conn = oracledb.connect(**connect_args)
+            self.log(f"Connected to Oracle Database: {self.dsn}")
         except Exception as e:
-            raise ConnectionError(f"Failed to connect to Oracle Database: {str(e)}")
-
-    # ---------------------
-    # Vector Store Builder
-    # ---------------------
-    @check_cached_vector_store
-    def build_vector_store(self) -> OracleVS:
-        """Build the Oracle Vector Store with configurable distance strategy."""
-        conn = self.get_database_connection()
+            error_msg = f"Failed to connect to Oracle Database: {str(e)}"
+            self.status = error_msg
+            raise ConnectionError(error_msg) from e
 
         try:
-            # Validate table exists
             cursor = conn.cursor()
             cursor.execute(
-                """
-                SELECT table_name
-                FROM user_tables
-                WHERE UPPER(table_name) = UPPER(:table_name)
-                """,
+                "SELECT table_name FROM user_tables WHERE UPPER(table_name) = UPPER(:table_name)",
                 {"table_name": self.table_name},
             )
             row = cursor.fetchone()
 
             if not row:
-                cursor.execute(
-                    """
-                    SELECT table_name
-                    FROM user_tables
-                    WHERE UPPER(table_name) LIKE '%COLLECTION%'
-                    ORDER BY table_name
-                    """
-                )
-                available = [r[0] for r in cursor.fetchall()]
                 cursor.close()
                 msg = f"Table '{self.table_name}' does not exist."
-                if available:
-                    msg += f" Available collection tables: {', '.join(available)}"
-                else:
-                    msg += " No collection tables found. Create a vector table first."
-                self.status = f"❌ {msg}"
+                self.status = msg
                 raise RuntimeError(msg)
 
             actual_table_name = row[0]
             cursor.close()
-
-            # Map UI distance strategy to enum
-            ds_map = {
-                "COSINE": DistanceStrategy.COSINE,
-                "EUCLIDEAN": DistanceStrategy.EUCLIDEAN,
-                "DOT_PRODUCT": DistanceStrategy.DOT_PRODUCT,
-            }
-            distance = ds_map.get(
-                getattr(self, "distance_strategy_ui", "COSINE"),
-                DistanceStrategy.COSINE,
-            )
-
-            vs = OracleVS(
-                client=conn,
-                table_name=actual_table_name,
-                distance_strategy=distance,
-                embedding_function=self.embedding,
-            )
-            self.status = f"✅ Connected to Oracle Vector Store table: {actual_table_name}"
-            return vs
-
+            self.log(f"Found table: {actual_table_name}")
         except Exception as e:
-            msg = f"Failed to build vector store: {str(e)}"
-            self.status = f"❌ {msg}"
-            raise RuntimeError(msg)
+            error_msg = f"Failed to validate table: {str(e)}"
+            self.status = error_msg
+            raise RuntimeError(error_msg) from e
 
-    # ---------------------
-    # Search
-    # ---------------------
-    def search_documents(self) -> List[Data]:
-        """Perform a similarity/MMR/thresholded vector search based on UI settings."""
-        if not self.search_query or not self.search_query.strip():
-            return []
+        ds_map = {
+            "COSINE": DistanceStrategy.COSINE,
+            "EUCLIDEAN_DISTANCE": DistanceStrategy.EUCLIDEAN_DISTANCE,
+            "DOT_PRODUCT": DistanceStrategy.DOT_PRODUCT,
+        }
+        distance = ds_map.get(self.distance_strategy, DistanceStrategy.COSINE)
 
-        vector_store = self.build_vector_store()
-        query = self.search_query.strip()
+        oracle_store = OracleVS(
+            client=conn,
+            table_name=actual_table_name,
+            distance_strategy=distance,
+            embedding_function=self.embedding,
+        )
 
-        # read UI values with sane defaults
-        try:
-            k = max(1, int(getattr(self, "number_of_results", 5) or 5))
-        except Exception:
-            k = 5
+        self.log(f"Created OracleVS instance for table: {actual_table_name}")
 
-        search_type = getattr(self, "search_type", "similarity") or "similarity"
+        self.ingest_data = self._prepare_ingest_data()
 
-        # optional knobs
-        fetch_k = getattr(self, "fetch_k", None)
-        try:
-            fetch_k = int(fetch_k) if fetch_k is not None else None
-        except Exception:
-            fetch_k = None
-
-        try:
-            mmr_lambda = float(getattr(self, "mmr_lambda", 0.5))
-        except Exception:
-            mmr_lambda = 0.5
-
-        try:
-            score_threshold = float(getattr(self, "score_threshold", 0.35))
-        except Exception:
-            score_threshold = 0.35
-
-        try:
-            if search_type == "similarity":
-                kwargs = {}
-                if fetch_k:
-                    kwargs["fetch_k"] = fetch_k
-                docs = vector_store.similarity_search(query=query, k=k, **kwargs)
-
-            elif search_type == "mmr":
-                kwargs = {}
-                if fetch_k:
-                    kwargs["fetch_k"] = fetch_k
-                docs = vector_store.max_marginal_relevance_search(
-                    query=query,
-                    k=k,
-                    lambda_mult=mmr_lambda,
-                    **kwargs,
-                )
-
-            elif search_type == "similarity_score_threshold":
-                retriever = vector_store.as_retriever(
-                    search_type="similarity_score_threshold",
-                    search_kwargs={
-                        "k": k,  # cap
-                        "score_threshold": score_threshold,
-                        **({"fetch_k": fetch_k} if fetch_k else {}),
-                    },
-                )
-                docs = retriever.get_relevant_documents(query)
-
+        documents = []
+        for _input in self.ingest_data or []:
+            if isinstance(_input, Data):
+                doc = _input.to_lc_document()
+                doc.metadata = self._clean_metadata(doc.metadata)
+                documents.append(doc)
             else:
-                # fallback to similarity
-                docs = vector_store.similarity_search(query=query, k=k)
+                if hasattr(_input, 'metadata'):
+                    _input.metadata = self._clean_metadata(_input.metadata)
+                documents.append(_input)
 
-            data = docs_to_data(docs)
-            self.status = data
-            return data
+        if documents:
+            try:
+                self.log(f"Ingesting {len(documents)} documents...")
+                oracle_store.add_documents(documents)
+                success_msg = f"Successfully added {len(documents)} documents"
+                self.status = success_msg
+                self.log(success_msg)
+            except Exception as e:
+                error_msg = f"Failed to add documents: {str(e)}"
+                self.status = error_msg
+                self.log(error_msg)
+                raise RuntimeError(error_msg) from e
 
-        except Exception as e:
-            self.status = f"Search failed: {str(e)}"
-            return []
+        return oracle_store
 
-    # ---------------------
-    # Ingest
-    # ---------------------
-    def add_documents(self, documents) -> None:
-        """Add documents to the vector store."""
-        vs = self.build_vector_store()
-        try:
-            vs.add_documents(documents)
-            self.status = f"Successfully added {len(documents)} documents"
-        except Exception as e:
-            self.status = f"Failed to add documents: {str(e)}"
-            raise
+    def search_documents(self) -> list[Data]:
+        vector_store = self.build_vector_store()
+
+        if self.search_query and isinstance(self.search_query, str) and self.search_query.strip():
+            query = self.search_query.strip()
+            k = max(1, self.number_of_results or 5)
+
+            self.log(f"Searching for: {query}")
+
+            try:
+                if self.search_type == "similarity":
+                    kwargs = {}
+                    if self.fetch_k:
+                        kwargs["fetch_k"] = self.fetch_k
+                    docs = vector_store.similarity_search(query=query, k=k, **kwargs)
+
+                elif self.search_type == "mmr":
+                    kwargs = {}
+                    if self.fetch_k:
+                        kwargs["fetch_k"] = self.fetch_k
+                    docs = vector_store.max_marginal_relevance_search(
+                        query=query,
+                        k=k,
+                        lambda_mult=self.mmr_lambda,
+                        **kwargs,
+                    )
+
+                elif self.search_type == "similarity_score_threshold":
+                    retriever = vector_store.as_retriever(
+                        search_type="similarity_score_threshold",
+                        search_kwargs={
+                            "k": k,
+                            "score_threshold": self.score_threshold,
+                            **({"fetch_k": self.fetch_k} if self.fetch_k else {}),
+                        },
+                    )
+                    docs = retriever.get_relevant_documents(query)
+
+                else:
+                    docs = vector_store.similarity_search(query=query, k=k)
+
+                data = docs_to_data(docs)
+                self.status = data
+                self.log(f"Found {len(docs)} results")
+                return data
+
+            except Exception as e:
+                error_msg = f"Search failed: {str(e)}"
+                self.status = error_msg
+                self.log(error_msg)
+                return []
+
+        return []
